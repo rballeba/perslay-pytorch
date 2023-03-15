@@ -5,7 +5,7 @@ import numpy as np
 
 
 def gather_nd(params, indices):
-    '''
+    """
     4D example
     params: tensor shaped [n_1, n_2, n_3, n_4] --> 4 dimensional
     indices: tensor shaped [m_1, m_2, m_3, m_4, 4] --> multidimensional list of 4D indices
@@ -17,7 +17,7 @@ def gather_nd(params, indices):
     indices: tensor shaped [m_1, ..., m_i, d] --> multidimensional list of d-dimensional indices
 
     returns: tensor shaped [m_1, ..., m_1]
-    '''
+    """
 
     out_shape = indices.shape[:-1]
     indices = indices.unsqueeze(0).transpose(0, -1)  # roll last axis to fring

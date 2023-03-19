@@ -1,4 +1,18 @@
-# Import pytorch
+"""
+This is a beta version of the PersLay library for PyTorch. There are only one difference
+between this version and the original PersLay library for Tensorflow: the random weight initializations.
+To initialize the weights randomly, in the TF version authors use the function tf.random_uniform_initializer(min, max)
+as a parameter. To obtain the exact same behaviour in the PyTorch version, you must use
+partial(torch.nn.init.uniform_, a=min, b=max). Other weight initialization functions can be used in the same way.
+
+Several improvements can still be made, such as:
+- Implementing gather_nd (and the code in general) in a more PyTorch way.
+- Debugging the code better.
+
+@author: Rubén Ballester
+@paper author and original idea: Mathieu Carriere et al.
+"""
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -40,9 +54,9 @@ def permutation_equivariant_layer(inp, dimension, perm_op, lbda, b, gamma):
     A = torch.reshape(torch.einsum("ijk,kl->ijl", inp, lbda), (-1, num_pts, dimension))
     if perm_op != None:
         if perm_op == "max":
-            beta = torch.unsqueeze(torch.max(inp, dim=1), 1).repeat(1, num_pts, 1)
+            beta = torch.unsqueeze(torch.max(inp, dim=1)[0], 1).repeat(1, num_pts, 1)
         elif perm_op == "min":
-            beta = torch.unsqueeze(torch.min(inp, dim=1), 1).repeat(1, num_pts, 1)
+            beta = torch.unsqueeze(torch.min(inp, dim=1)[0], 1).repeat(1, num_pts, 1)
         elif perm_op == "sum":
             beta = torch.unsqueeze(torch.sum(inp, dim=1), 1).repeat(1, num_pts, 1)
         else:
@@ -113,7 +127,7 @@ def image_layer(inp, image_size, image_bnds, sg):
     dimension_before, num_pts = inp.shape[2], inp.shape[1]
     coords = [torch.arange(start=image_bnds[i][0], end=image_bnds[i][1],
                            step=(image_bnds[i][1] - image_bnds[i][0]) / image_size[i]) for i in range(dimension_before)]
-    M = torch.meshgrid(*coords)
+    M = torch.meshgrid(*coords, indexing='ij')
     mu = torch.cat([torch.unsqueeze(tens, 0) for tens in M], dim=0)
     bc_inp = bp_inp.reshape(-1, num_pts, dimension_before, *(1 for _ in range(dimension_before)))
     return torch.unsqueeze(torch.exp(torch.sum(-torch.square(bc_inp - mu) / (2.0 * torch.square(sg)), dim=2)) / (
@@ -121,16 +135,15 @@ def image_layer(inp, image_size, image_bnds, sg):
 
 
 class PerslayModel(nn.Module):
-    def __init__(self, name, diagdim, perslay_parameters, rho):
+    def __init__(self, diagdim, perslay_parameters, rho):
         super().__init__()
-        self.name_model = name
         self.diag_dim = diagdim
         self.perslay_parameters = perslay_parameters
         self.rho = rho
 
         self.vars = [[] for _ in range(len(self.perslay_parameters))]
         for nf, plp in enumerate(self.perslay_parameters):
-            weight = plp['weight']
+            weight = plp['pweight']
             if weight is not None:
                 Winit, Wtrain = plp["pweight_init"], plp["pweight_train"]
                 if not callable(Winit):
@@ -140,67 +153,109 @@ class PerslayModel(nn.Module):
                         W = torch.tensor(Winit([1]), requires_grad=Wtrain)
                     elif weight == 'grid':
                         Wshape = plp["pweight_size"]
-                        W = torch.tensor(Winit(Wshape), requires_grad=Wtrain)
+                        W = torch.empty(Wshape, requires_grad=Wtrain)
+                        Winit(W)
                     elif weight == 'gmix':
                         ngs = plp["pweight_num"]
-                        W = torch.tensor(Winit([4, ngs]), requires_grad=Wtrain)
+                        W = torch.empty(4, ngs, requires_grad=Wtrain)
+                        Winit(W)
             else:
                 W = 0
             self.vars[nf].append(W)
-        layer, L_train = plp["layer"], plp["layer_train"]
-        if layer == "PermutationEquivariant":
-            Lpeq, LWinit, LBinit, LGinit = plp["lpeq"], plp["lweight_init"], plp["lbias_init"], plp["lgamma_init"]
-            LW, LB, LG = [], [], []
-            for idx, (dim, pop) in enumerate(Lpeq):
-                dim_before = self.diagdim if idx == 0 else Lpeq[idx - 1][0]
-                LWiv = LWinit([dim_before, dim]) if callable(LWinit) else LWinit
-                LBiv = LBinit([dim]) if callable(LBinit) else LBinit
-                LW.append(torch.tensor(LWiv, requires_grad=L_train))
-                LB.append(torch.tensor(LBiv, requires_grad=L_train))
-                if pop is not None:
-                    LGiv = LGinit([dim_before, dim]) if callable(LGinit) else LGinit
-                    LG.append(torch.tensor(LGiv, requires_grad=L_train))
+
+            layer, L_train = plp["layer"], plp["layer_train"]
+
+            if layer == "PermutationEquivariant":
+                Lpeq, LWinit, LBinit, LGinit = plp["lpeq"], plp["lweight_init"], plp["lbias_init"], plp["lgamma_init"]
+                LW, LB, LG = [], [], []
+                for idx, (dim, pop) in enumerate(Lpeq):
+                    dim_before = self.diag_dim if idx == 0 else Lpeq[idx - 1][0]
+                    if callable(LWinit):
+                        LWvar = torch.empty(dim_before, dim, requires_grad=L_train)
+                        LWinit(LWvar)
+                    else:
+                        LWvar = torch.tensor(LWinit, requires_grad=L_train)
+                    if callable(LBinit):
+                        LBvar = torch.empty(dim, requires_grad=L_train)
+                        LBinit(LBvar)
+                    else:
+                        LBvar = torch.tensor(LBinit, requires_grad=L_train)
+                    LW.append(LWvar)
+                    LB.append(LBvar)
+                    if pop is not None:
+                        if callable(LGinit):
+                            LGvar = torch.empty(dim_before, dim, requires_grad=L_train)
+                            LGinit(LGvar)
+                        else:
+                            LGvar = torch.tensor(LGinit, requires_grad=L_train)
+                        LG.append(LGvar)
+                    else:
+                        LG.append([])
+                self.vars[nf].append([LW, LB, LG])
+            elif layer == "Landscape" or layer == "BettiCurve" or layer == "Entropy":
+                LSinit = plp["lsample_init"]
+                if callable(LSinit):
+                    LSiv = torch.empty(plp["lsample_num"], requires_grad=L_train)
+                    LSinit(LSiv)
                 else:
-                    LG.append([])
-            self.vars[nf].append([LW, LB, LG])
-        elif layer == "Landscape" or layer == "BettiCurve" or layer == "Entropy":
-            LSinit = plp["lsample_init"]
-            LSiv = LSinit if not callable(LSinit) else LSinit([plp["lsample_num"]])
-            LS = torch.tensor(LSiv, requires_grad=L_train)
-            self.vars[nf].append(LS)
+                    LSiv = torch.tensor(LSinit, requires_grad=L_train)
+                self.vars[nf].append(LSiv)
 
-        elif layer == "Image":
-            LVinit = plp["lvariance_init"]
-            LViv = LVinit if not callable(LVinit) else LVinit([1])
-            LV = torch.tensor(LViv, requires_grad=L_train)
-            self.vars[nf].append(LV)
+            elif layer == "Image":
+                LVinit = plp["lvariance_init"]
+                if callable(LVinit):
+                    LViv = torch.empty(1, requires_grad=L_train)
+                    LVinit(LViv)
+                else:
+                    LViv = torch.tensor(LVinit, requires_grad=L_train)
+                self.vars[nf].append(LViv)
 
-        elif layer == "Exponential":
-            LMinit, LVinit = plp["lmean_init"], plp["lvariance_init"]
-            LMiv = LMinit if not callable(LMinit) else LMinit([self.diagdim, plp["lnum"]])
-            LViv = LVinit if not callable(LVinit) else LVinit([self.diagdim, plp["lnum"]])
-            LM = torch.tensor(LMiv, requires_grad=L_train)
-            LV = torch.tensor(LViv, requires_grad=L_train)
-            self.vars[nf].append([LM, LV])
+            elif layer == "Exponential":
+                LMinit, LVinit = plp["lmean_init"], plp["lvariance_init"]
+                if callable(LMinit):
+                    LMiv = torch.empty(self.diag_dim, plp["lnum"], requires_grad=L_train)
+                    LMinit(LMiv)
+                else:
+                    LMiv = torch.tensor(LMinit, requires_grad=L_train)
+                if callable(LVinit):
+                    LViv = torch.empty(self.diag_dim, plp["lnum"], requires_grad=L_train)
+                    LVinit(LViv)
+                else:
+                    LViv = torch.tensor(LVinit, requires_grad=L_train)
+                self.vars[nf].append([LMiv, LViv])
 
-        elif layer == "Rational":
-            LMinit, LVinit, LAinit = plp["lmean_init"], plp["lvariance_init"], plp["lalpha_init"]
-            LMiv = LMinit if not callable(LMinit) else LMinit([self.diagdim, plp["lnum"]])
-            LViv = LVinit if not callable(LVinit) else LVinit([self.diagdim, plp["lnum"]])
-            LAiv = LAinit if not callable(LAinit) else LAinit([plp["lnum"]])
-            LM = torch.tensor(LMiv, requires_grad=L_train)
-            LV = torch.tensor(LViv, requires_grad=L_train)
-            LA = torch.tensor(LAiv, requires_grad=L_train)
-            self.vars[nf].append([LM, LV, LA])
+            elif layer == "Rational":
+                LMinit, LVinit, LAinit = plp["lmean_init"], plp["lvariance_init"], plp["lalpha_init"]
+                if callable(LMinit):
+                    LMiv = torch.empty(self.diag_dim, plp["lnum"], requires_grad=L_train)
+                    LMinit(LMiv)
+                else:
+                    LMiv = torch.tensor(LMinit, requires_grad=L_train)
+                if callable(LVinit):
+                    LViv = torch.empty(self.diag_dim, plp["lnum"], requires_grad=L_train)
+                    LVinit(LViv)
+                else:
+                    LViv = torch.tensor(LVinit, requires_grad=L_train)
+                if callable(LAinit):
+                    LAiv = torch.empty(plp["lnum"], requires_grad=L_train)
+                    LAinit(LAiv)
+                else:
+                    LAiv = torch.tensor(LAinit, requires_grad=L_train)
+                self.vars[nf].append([LMiv, LViv, LAiv])
 
-        elif layer == "RationalHat":
-            LMinit, LRinit = plp["lmean_init"], plp["lr_init"]
-            LVinit = plp["lvariance_init"]
-            LMiv = LMinit if not callable(LMinit) else LMinit([self.diagdim, plp["lnum"]])
-            LRiv = LRinit if not callable(LRinit) else LVinit([1])
-            LM = torch.tensor(LMiv, requires_grad=L_train)
-            LR = torch.tensor(LRiv, requires_grad=L_train)
-            self.vars[nf].append([LM, LR])
+            elif layer == "RationalHat":
+                LMinit, LRinit = plp["lmean_init"], plp["lr_init"]
+                if callable(LMinit):
+                    LMiv = torch.empty(self.diag_dim, plp["lnum"], requires_grad=L_train)
+                    LMinit(LMiv)
+                else:
+                    LMiv = torch.tensor(LMinit, requires_grad=L_train)
+                if callable(LRinit):
+                    LRiv = torch.empty(1, requires_grad=L_train)
+                    LRinit(LRiv)
+                else:
+                    LRiv = torch.tensor(LRinit, requires_grad=L_train)
+                self.vars[nf].append([LMiv, LRiv])
 
     def compute_representations(self, diags, training=False):
         list_v = []
@@ -230,60 +285,61 @@ class PerslayModel(nn.Module):
                 weight = torch.unsqueeze(torch.sum(
                     torch.exp(torch.sum(-torch.multiply(torch.square(bc_inp - M), torch.square(V)),
                                         dim=2)), dim=2), -1)
-                lvars = self.vars[nf][1]
-                if plp["layer"] == "PermutationEquivariant":
-                    for idx, (dim, pop) in enumerate(plp["lpeq"]):
-                        tensor_diag = permutation_equivariant_layer(tensor_diag, dim, pop, lvars[0][idx], lvars[1][idx],
-                                                                    lvars[2][idx])
-                elif plp["layer"] == "Landscape":
-                    tensor_diag = landscape_layer(tensor_diag, lvars)
-                elif plp["layer"] == "BettiCurve":
-                    tensor_diag = betti_layer(tensor_diag, plp["theta"], lvars)
-                elif plp["layer"] == "Entropy":
-                    tensor_diag = entropy_layer(tensor_diag, plp["theta"], lvars)
-                elif plp["layer"] == "Image":
-                    tensor_diag = image_layer(tensor_diag, plp["image_size"], plp["image_bnds"], lvars)
-                elif plp["layer"] == "Exponential":
-                    tensor_diag = exponential_layer(tensor_diag, **lvars)
-                elif plp["layer"] == "Rational":
-                    tensor_diag = rational_layer(tensor_diag, **lvars)
-                elif plp["layer"] == "RationalHat":
-                    tensor_diag = rational_hat_layer(tensor_diag, plp["q"], **lvars)
+            lvars = self.vars[nf][1]
+            if plp["layer"] == "PermutationEquivariant":
+                for idx, (dim, pop) in enumerate(plp["lpeq"]):
+                    tensor_diag = permutation_equivariant_layer(tensor_diag, dim, pop, lvars[0][idx], lvars[1][idx],
+                                                                lvars[2][idx])
+            elif plp["layer"] == "Landscape":
+                tensor_diag = landscape_layer(tensor_diag, lvars)
+            elif plp["layer"] == "BettiCurve":
+                tensor_diag = betti_layer(tensor_diag, plp["theta"], lvars)
+            elif plp["layer"] == "Entropy":
+                tensor_diag = entropy_layer(tensor_diag, plp["theta"], lvars)
+            elif plp["layer"] == "Image":
+                tensor_diag = image_layer(tensor_diag, plp["image_size"], plp["image_bnds"], lvars)
+            elif plp["layer"] == "Exponential":
+                tensor_diag = exponential_layer(tensor_diag, lvars[0], lvars[1])
+            elif plp["layer"] == "Rational":
+                tensor_diag = rational_layer(tensor_diag, lvars[0], lvars[1], lvars[2])
+            elif plp["layer"] == "RationalHat":
+                tensor_diag = rational_hat_layer(tensor_diag, plp["q"], lvars[0], lvars[1])
 
-                # Apply weight
-                output_dim = len(tensor_diag.shape) - 2
-                if plp["pweight"] != None:
-                    for _ in range(output_dim - 1):
-                        weight = torch.unsqueeze(weight, -1)
-                        tiled_weight = weight.repeat(1, 1, *tensor_diag.shape[2:])
-                        tensor_diag = torch.multiply(tensor_diag, tiled_weight)
+            # Apply weight
+            output_dim = len(tensor_diag.shape) - 2
+            if plp["pweight"] != None:
+                for _ in range(output_dim - 1):
+                    weight = torch.unsqueeze(weight, -1)
+                tiled_weight = weight.repeat(1, 1, *tensor_diag.shape[2:])
+                tensor_diag = torch.multiply(tensor_diag, tiled_weight)
 
-                # Apply mask
-                for _ in range(output_dim):
-                    tensor_mask = torch.unsqueeze(tensor_mask, -1)
-                tiled_mask = tensor_mask.repeat(1, 1, *tensor_diag.shape[2:])
-                masked_layer = torch.multiply(tensor_diag, tiled_mask)
+            # Apply mask
+            for _ in range(output_dim):
+                tensor_mask = torch.unsqueeze(tensor_mask, -1)
+            tiled_mask = tensor_mask.repeat(1, 1, *tensor_diag.shape[2:])
+            masked_layer = torch.multiply(tensor_diag, tiled_mask)
 
-                # Permutation invariant operation
-                if plp["perm_op"] == "topk" and output_dim == 1:  # k first values
-                    masked_layer_t = masked_layer.transpose(1, 2)
-                    values, indices = torch.topk(masked_layer_t, k=plp["keep"])
-                    vector = torch.reshape(values, (-1, plp["keep"] * tensor_diag.shape[2]))
-                elif plp["perm_op"] == "sum":  # sum
-                    vector = torch.sum(masked_layer, dim=1)
-                elif plp["perm_op"] == "max":  # maximum
-                    vector = torch.max(masked_layer, dim=1)
-                elif plp["perm_op"] == "mean":  # minimum
-                    vector = torch.mean(masked_layer, dim=1)
+            # Permutation invariant operation
+            if plp["perm_op"] == "topk" and output_dim == 1:  # k first values
+                masked_layer_t = masked_layer.transpose(1, 2)
+                values, indices = torch.topk(masked_layer_t, k=plp["keep"])
+                vector = torch.reshape(values, (-1, plp["keep"] * tensor_diag.shape[2]))
+            elif plp["perm_op"] == "sum":  # sum
+                vector = torch.sum(masked_layer, dim=1)
+            elif plp["perm_op"] == "max":  # maximum
+                vector, _ = torch.max(masked_layer, dim=1)
+            elif plp["perm_op"] == "mean":  # minimum
+                vector = torch.mean(masked_layer, dim=1)
+            else:
+                raise ValueError("Unknown permutation invariant operation or output dim != 1 for perm_op=topk.")
+            # Second layer of channel
+            vector = plp["final_model"].forward(vector, training=training) \
+                if plp["final_model"] != "identity" else vector
+            list_v.append(vector)
 
-                # Second layer of channel
-                vector = plp["final_model"].forward(vector, training=training) \
-                    if plp["final_model"] != "identity" else vector
-                list_v.append(vector)
-
-            # Concatenate all channels and add other features
-            representations = torch.cat(list_v, dim=1)
-            return representations
+        # Concatenate all channels and add other features
+        representations = torch.cat(list_v, dim=1)
+        return representations
 
     def forward(self, x, training=False):
         diags, feats = x[0], x[1]

@@ -4,10 +4,13 @@ between this version and the original PersLay library for Tensorflow: the random
 To initialize the weights randomly, in the TF version authors use the function tf.random_uniform_initializer(min, max)
 as a parameter. To obtain the exact same behaviour in the PyTorch version, you must use
 partial(torch.nn.init.uniform_, a=min, b=max). Other weight initialization functions can be used in the same way.
+Also, the parameters perslay_channel["pweight_train"], and perslay_channel["layer_train"] are not used and are
+True by default.
 
 Several improvements can still be made, such as:
 - Implementing gather_nd (and the code in general) in a more PyTorch way.
 - Debugging the code better.
+- Check if the parameters are added properly for training with PyTorch
 
 @author: Rubén Ballester
 @paper author and original idea: Mathieu Carriere et al.
@@ -141,123 +144,123 @@ class PerslayModel(nn.Module):
         self.perslay_parameters = perslay_parameters
         self.rho = rho
 
-        self.vars = [[] for _ in range(len(self.perslay_parameters))]
+        self.vars = torch.nn.ParameterList([[] for _ in range(len(self.perslay_parameters))])
         for nf, plp in enumerate(self.perslay_parameters):
             weight = plp['pweight']
             if weight is not None:
-                Winit, Wtrain = plp["pweight_init"], plp["pweight_train"]
+                Winit = plp["pweight_init"]
                 if not callable(Winit):
-                    W = torch.tensor(Winit, requires_grad=Wtrain)
+                    W = torch.tensor(Winit)
                 else:
                     if weight == 'power':
-                        W = torch.tensor(Winit([1]), requires_grad=Wtrain)
+                        W = torch.tensor(Winit([1]))
                     elif weight == 'grid':
                         Wshape = plp["pweight_size"]
-                        W = torch.empty(Wshape, requires_grad=Wtrain)
+                        W = torch.empty(Wshape)
                         Winit(W)
                     elif weight == 'gmix':
                         ngs = plp["pweight_num"]
-                        W = torch.empty(4, ngs, requires_grad=Wtrain)
+                        W = torch.empty(4, ngs)
                         Winit(W)
             else:
-                W = 0
-            self.vars[nf].append(W)
+                W = torch.tensor(0.0)
+            self.vars[nf].append(torch.nn.Parameter(W))
 
-            layer, L_train = plp["layer"], plp["layer_train"]
+            layer = plp["layer"]
 
             if layer == "PermutationEquivariant":
                 Lpeq, LWinit, LBinit, LGinit = plp["lpeq"], plp["lweight_init"], plp["lbias_init"], plp["lgamma_init"]
-                LW, LB, LG = [], [], []
+                LW, LB, LG = torch.nn.ParameterList([]), torch.nn.ParameterList([]), torch.nn.ParameterList([])
                 for idx, (dim, pop) in enumerate(Lpeq):
                     dim_before = self.diag_dim if idx == 0 else Lpeq[idx - 1][0]
                     if callable(LWinit):
-                        LWvar = torch.empty(dim_before, dim, requires_grad=L_train)
+                        LWvar = torch.empty(dim_before, dim)
                         LWinit(LWvar)
                     else:
-                        LWvar = torch.tensor(LWinit, requires_grad=L_train)
+                        LWvar = torch.tensor(LWinit)
                     if callable(LBinit):
-                        LBvar = torch.empty(dim, requires_grad=L_train)
+                        LBvar = torch.empty(dim)
                         LBinit(LBvar)
                     else:
-                        LBvar = torch.tensor(LBinit, requires_grad=L_train)
-                    LW.append(LWvar)
-                    LB.append(LBvar)
+                        LBvar = torch.tensor(LBinit)
+                    LW.append(torch.nn.Parameter(LWvar))
+                    LB.append(torch.nn.Parameter(LBvar))
                     if pop is not None:
                         if callable(LGinit):
-                            LGvar = torch.empty(dim_before, dim, requires_grad=L_train)
+                            LGvar = torch.empty(dim_before, dim)
                             LGinit(LGvar)
                         else:
-                            LGvar = torch.tensor(LGinit, requires_grad=L_train)
-                        LG.append(LGvar)
+                            LGvar = torch.tensor(LGinit)
+                        LG.append(torch.nn.Parameter(LGvar))
                     else:
                         LG.append([])
-                self.vars[nf].append([LW, LB, LG])
+                self.vars[nf].append(torch.nn.ParameterList([LW, LB, LG]))
             elif layer == "Landscape" or layer == "BettiCurve" or layer == "Entropy":
                 LSinit = plp["lsample_init"]
                 if callable(LSinit):
-                    LSiv = torch.empty(plp["lsample_num"], requires_grad=L_train)
+                    LSiv = torch.empty(plp["lsample_num"])
                     LSinit(LSiv)
                 else:
-                    LSiv = torch.tensor(LSinit, requires_grad=L_train)
-                self.vars[nf].append(LSiv)
+                    LSiv = torch.tensor(LSinit)
+                self.vars[nf].append(torch.nn.Parameter(LSiv))
 
             elif layer == "Image":
                 LVinit = plp["lvariance_init"]
                 if callable(LVinit):
-                    LViv = torch.empty(1, requires_grad=L_train)
+                    LViv = torch.empty(1)
                     LVinit(LViv)
                 else:
-                    LViv = torch.tensor(LVinit, requires_grad=L_train)
-                self.vars[nf].append(LViv)
+                    LViv = torch.tensor(LVinit)
+                self.vars[nf].append(torch.nn.Parameter(LViv))
 
             elif layer == "Exponential":
                 LMinit, LVinit = plp["lmean_init"], plp["lvariance_init"]
                 if callable(LMinit):
-                    LMiv = torch.empty(self.diag_dim, plp["lnum"], requires_grad=L_train)
+                    LMiv = torch.empty(self.diag_dim, plp["lnum"])
                     LMinit(LMiv)
                 else:
-                    LMiv = torch.tensor(LMinit, requires_grad=L_train)
+                    LMiv = torch.tensor(LMinit)
                 if callable(LVinit):
-                    LViv = torch.empty(self.diag_dim, plp["lnum"], requires_grad=L_train)
+                    LViv = torch.empty(self.diag_dim, plp["lnum"])
                     LVinit(LViv)
                 else:
-                    LViv = torch.tensor(LVinit, requires_grad=L_train)
-                self.vars[nf].append([LMiv, LViv])
+                    LViv = torch.tensor(LVinit)
+                self.vars[nf].append(torch.nn.ParameterList([torch.nn.Parameter(LMiv), torch.nn.Parameter(LViv)]))
 
             elif layer == "Rational":
                 LMinit, LVinit, LAinit = plp["lmean_init"], plp["lvariance_init"], plp["lalpha_init"]
                 if callable(LMinit):
-                    LMiv = torch.empty(self.diag_dim, plp["lnum"], requires_grad=L_train)
+                    LMiv = torch.empty(self.diag_dim, plp["lnum"])
                     LMinit(LMiv)
                 else:
-                    LMiv = torch.tensor(LMinit, requires_grad=L_train)
+                    LMiv = torch.tensor(LMinit)
                 if callable(LVinit):
-                    LViv = torch.empty(self.diag_dim, plp["lnum"], requires_grad=L_train)
+                    LViv = torch.empty(self.diag_dim, plp["lnum"])
                     LVinit(LViv)
                 else:
-                    LViv = torch.tensor(LVinit, requires_grad=L_train)
+                    LViv = torch.tensor(LVinit)
                 if callable(LAinit):
-                    LAiv = torch.empty(plp["lnum"], requires_grad=L_train)
+                    LAiv = torch.empty(plp["lnum"])
                     LAinit(LAiv)
                 else:
-                    LAiv = torch.tensor(LAinit, requires_grad=L_train)
-                self.vars[nf].append([LMiv, LViv, LAiv])
+                    LAiv = torch.tensor(LAinit)
+                self.vars[nf].append(torch.nn.ParameterList([torch.nn.Parameter(LMiv), torch.nn.Parameter(LViv), torch.nn.Parameter(LAiv)]))
 
             elif layer == "RationalHat":
                 LMinit, LRinit = plp["lmean_init"], plp["lr_init"]
                 if callable(LMinit):
-                    LMiv = torch.empty(self.diag_dim, plp["lnum"], requires_grad=L_train)
+                    LMiv = torch.empty(self.diag_dim, plp["lnum"])
                     LMinit(LMiv)
                 else:
-                    LMiv = torch.tensor(LMinit, requires_grad=L_train)
+                    LMiv = torch.tensor(LMinit)
                 if callable(LRinit):
-                    LRiv = torch.empty(1, requires_grad=L_train)
+                    LRiv = torch.empty(1)
                     LRinit(LRiv)
                 else:
-                    LRiv = torch.tensor(LRinit, requires_grad=L_train)
-                self.vars[nf].append([LMiv, LRiv])
+                    LRiv = torch.tensor(LRinit)
+                self.vars[nf].append(torch.nn.ParameterList([torch.nn.Parameter(LMiv), torch.nn.Parameter(LRiv)]))
 
-    def compute_representations(self, diags, training=False):
+    def compute_representations(self, diags):
         list_v = []
         for nf, plp in enumerate(self.perslay_parameters):
             diag = diags[nf]
@@ -333,7 +336,7 @@ class PerslayModel(nn.Module):
             else:
                 raise ValueError("Unknown permutation invariant operation or output dim != 1 for perm_op=topk.")
             # Second layer of channel
-            vector = plp["final_model"].forward(vector, training=training) \
+            vector = plp["final_model"].forward(vector) \
                 if plp["final_model"] != "identity" else vector
             list_v.append(vector)
 
@@ -341,9 +344,9 @@ class PerslayModel(nn.Module):
         representations = torch.cat(list_v, dim=1)
         return representations
 
-    def forward(self, x, training=False):
+    def forward(self, x):
         diags, feats = x[0], x[1]
-        representations = self.compute_representations(diags, training)
+        representations = self.compute_representations(diags)
         concat_representations = torch.cat([representations, feats], dim=1)
         final_representations = self.rho(concat_representations) if self.rho != "identity" else concat_representations
         return final_representations

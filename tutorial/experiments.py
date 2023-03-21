@@ -7,6 +7,7 @@ import pandas             as pd
 import tensorflow         as tf
 import tensorflow_addons  as tfa
 import gudhi              as gd
+import torch
 
 from scipy.sparse           import csgraph
 from scipy.io               import loadmat
@@ -398,3 +399,32 @@ def evaluate_model(L, F, D, train_sub, test_sub, model, optimizer, loss, metrics
 
     return history.history, train_results, test_results
 
+def train_model_pytorch(L, F, D, train_sub, test_sub, model, optimizer, loss, num_epochs, batch_size=20, verbose=False):
+    num_pts, num_labels, num_features, num_filt = L.shape[0], L.shape[1], F.shape[1], len(D)
+    train_num_pts, test_num_pts = len(train_sub), len(test_sub)
+    label_train, label_test = torch.tensor(L[train_sub, :]), torch.tensor(L[test_sub, :])
+    feats_train, feats_test = torch.tensor(F[train_sub, :]), torch.tensor(F[test_sub, :])
+    diags_train, diags_test = [torch.tensor(D[dt][train_sub, :]) for dt in range(num_filt)], [
+        torch.tensor(D[dt][test_sub, :]) for dt in range(num_filt)]
+    # Train the model
+    train_num_points, test_num_points = label_train.shape[0], label_test.shape[0]
+    # Training of the model
+    for epoch in range(num_epochs):
+        for i in range(train_num_points // batch_size):
+            # get the inputs
+            diags_batch = [diags_train[dt][i * batch_size:(i + 1) * batch_size, :] for dt in range(num_filt)]
+            feats_batch = feats_train[i * batch_size:(i + 1) * batch_size, :]
+            labels_batch = label_train[i * batch_size:(i + 1) * batch_size, :]
+            optimizer.zero_grad()
+            outputs = model([diags_batch])
+            loss_value = loss(outputs, torch.argmax(labels_batch, dim=1))
+            loss_value.backward()
+            optimizer.step()
+            if verbose:
+                # print statistics
+                print(f'[{epoch + 1}, {i + 1:5d}] loss: {loss_value.item():.3f}')
+                # Print the weights of the model
+                for name, param in model.named_parameters():
+                    print(name, param.data)
+                print("=====================================")
+    print('Finished Training')
